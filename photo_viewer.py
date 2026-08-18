@@ -77,6 +77,14 @@ class ImageViewer:
         self.canvas.pack(fill=tk.BOTH, expand=True)
         
         self.canvas.bind("<MouseWheel>", self.on_mouse_wheel)
+        # Tk 9 在 macOS/Windows 上会为触控板和 Magic Mouse 发送高精度滚动事件。
+        try:
+            self.canvas.bind("<TouchpadScroll>", self.on_touchpad_scroll)
+        except tk.TclError:
+            # Tk 8.6 不支持该事件，继续使用 MouseWheel。
+            pass
+        self.canvas.bind("<Button-4>", self.on_mouse_wheel_up)
+        self.canvas.bind("<Button-5>", self.on_mouse_wheel_down)
         self.canvas.bind("<ButtonPress-1>", self.on_button_press)
         self.canvas.bind("<B1-Motion>", self.on_mouse_drag)
 
@@ -1003,25 +1011,69 @@ class ImageViewer:
                 self.index = len(self.images) - 1
                 self.show_end_dialog()
 
-    def on_mouse_wheel(self, event):
-        if not getattr(self, 'current_img_obj', None): return
+    @staticmethod
+    def _decode_touchpad_delta(packed_delta):
+        """解析 Tk 9 打包的两个有符号 16 位滚动增量。"""
+        packed = int(packed_delta) & 0xFFFFFFFF
+        delta_x = (packed >> 16) & 0xFFFF
+        delta_y = packed & 0xFFFF
+        if delta_x >= 0x8000:
+            delta_x -= 0x10000
+        if delta_y >= 0x8000:
+            delta_y -= 0x10000
+        return delta_x, delta_y
+
+    def _zoom_at_cursor(self, x, y, steps):
+        if not getattr(self, 'current_img_obj', None) or steps == 0:
+            return "break"
+
         self.is_fit = False
-        scale_factor = 1.1 if event.delta > 0 else 0.9
-        
-        x = event.x
-        y = event.y
+        steps = max(-4.0, min(4.0, float(steps)))
+        scale_factor = 1.1 ** steps
+
         ww = self.canvas.winfo_width()
         wh = self.canvas.winfo_height()
-        
+
         cursor_im_x = self.im_x + (x - ww / 2) / self.current_scale
         cursor_im_y = self.im_y + (y - wh / 2) / self.current_scale
-        
+
         self.current_scale *= scale_factor
-        
+
         self.im_x = cursor_im_x - (x - ww / 2) / self.current_scale
         self.im_y = cursor_im_y - (y - wh / 2) / self.current_scale
-        
+
         self.display_image()
+        return "break"
+
+    def on_mouse_wheel(self, event):
+        delta = float(getattr(event, 'delta', 0))
+        if delta == 0:
+            return "break"
+
+        if sys.platform == 'win32':
+            steps = delta / 120.0
+        elif sys.platform == 'darwin':
+            steps = delta
+        else:
+            steps = delta / 120.0 if abs(delta) >= 120 else delta
+        return self._zoom_at_cursor(event.x, event.y, steps)
+
+    def on_touchpad_scroll(self, event):
+        try:
+            delta_x, delta_y = self.root.tk.call(
+                "tk::PreciseScrollDeltas", int(event.delta)
+            )
+        except (tk.TclError, TypeError, ValueError):
+            delta_x, delta_y = self._decode_touchpad_delta(event.delta)
+
+        del delta_x
+        return self._zoom_at_cursor(event.x, event.y, float(delta_y) / 10.0)
+
+    def on_mouse_wheel_up(self, event):
+        return self._zoom_at_cursor(event.x, event.y, 1.0)
+
+    def on_mouse_wheel_down(self, event):
+        return self._zoom_at_cursor(event.x, event.y, -1.0)
 
     def on_button_press(self, event):
         self.drag_start_x = event.x
